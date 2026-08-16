@@ -1,22 +1,22 @@
-# Copyright (c) 2026 yuzeis
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 import argparse
 import os
 import socket
+import sys
 import threading
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Callable, Tuple, Any, Set, List
 
 import psutil
-from scapy.all import sniff, get_if_list, IP, IPv6, TCP, UDP
+from scapy.all import conf, sniff, get_if_list, IP, IPv6, TCP, UDP
 
-# zstd解压支持
+# zstd展開のサポート
 try:
     import zstandard as zstd
     HAS_ZSTD = True
@@ -26,21 +26,21 @@ except ImportError:
 
 
 def ts_ms() -> str:
-    """生成精确到毫秒的时间戳"""
+    """ミリ秒まで含むタイムスタンプを生成する。"""
     return datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
 
 
-# ===== 网络接口工具函数 =====
+# ===== ネットワークインターフェース補助関数 =====
 
 def get_network_interfaces() -> List[Dict]:
     """
-    获取可用的网络接口
+    利用可能なネットワークインターフェースを取得する。
     
-    Returns:
-        包含接口信息的字典列表，每个字典包含：
-        - name: 接口名称
-        - scapy_name: Scapy使用的接口名
-        - addresses: IPv4地址列表
+    戻り値:
+        インターフェース情報を含む辞書のリスト。各辞書には次を含む：
+        - name：インターフェース名
+        - scapy_name：Scapyが使用するインターフェース名
+        - addresses：IPv4アドレスのリスト
     """
     interfaces = []
 
@@ -50,25 +50,34 @@ def get_network_interfaces() -> List[Dict]:
         scapy_ifaces = get_if_list()
 
         for name, addrs in net_if_addrs.items():
-            # 跳过虚拟接口
+            # 仮想インターフェースを除外
             if name.startswith(("vEthernet", "VMware", "VirtualBox")):
                 continue
 
-            # 检查接口是否启用
+            # インターフェースが有効か確認
             stats = net_if_stats.get(name)
             if stats and not stats.isup:
                 continue
 
-            # 收集IPv4地址
+            # IPv4アドレスを収集
             ipv4_list = [addr.address for addr in addrs if addr.family == socket.AF_INET]
             if not ipv4_list:
                 continue
 
-            # 匹配Scapy接口名
-            scapy_name = next(
-                (si for si in scapy_ifaces if name.lower() in si.lower() or si.lower() in name.lower()),
-                name
-            )
+            # WindowsではNpcapデバイス名とpsutilの表示名が一致しないため、
+            # ScapyのインターフェースオブジェクトをIPまたは表示名で対応付ける。
+            scapy_name = name
+            for scapy_iface in conf.ifaces.values():
+                iface_name = str(getattr(scapy_iface, "name", ""))
+                iface_ip = str(getattr(scapy_iface, "ip", ""))
+                if iface_ip in ipv4_list or iface_name.casefold() == name.casefold():
+                    scapy_name = str(scapy_iface)
+                    break
+            else:
+                scapy_name = next(
+                    (si for si in scapy_ifaces if name.casefold() in si.casefold()),
+                    name,
+                )
 
             interfaces.append({
                 "name": name,
@@ -77,13 +86,13 @@ def get_network_interfaces() -> List[Dict]:
             })
 
     except Exception as e:
-        print(f"[!] 获取网络接口失败: {e}")
+        print(f"[!] ネットワークインターフェースの取得に失敗しました：{e}")
 
     return interfaces
 
 
 def _get_default_local_ipv4() -> Optional[str]:
-    """通过UDP连接推断系统默认出口IPv4（不会真正发包）"""
+    """UDP接続からシステムのデフォルト出口IPv4を推定する（実際には送信しない）。"""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -96,15 +105,15 @@ def _get_default_local_ipv4() -> Optional[str]:
 
 def auto_select_network_interface(interfaces: List[Dict]) -> int:
     """
-    自动选择最可能可用的网络接口
+    利用可能性が最も高いネットワークインターフェースを自動選択する。
     
-    优先级：
-    1. 仅有一个接口时直接选择
-    2. 匹配默认出口IPv4对应的接口
-    3. 回退选择第一个接口
+    優先順位：
+    1. インターフェースが1つだけなら直接選択
+    2. デフォルト出口IPv4に対応するインターフェースを選択
+    3. 最初のインターフェースにフォールバック
     """
     if not interfaces:
-        raise RuntimeError("未找到可用的网络接口")
+        raise RuntimeError("利用可能なネットワークインターフェースが見つかりません")
 
     if len(interfaces) == 1:
         return 0
@@ -119,38 +128,38 @@ def auto_select_network_interface(interfaces: List[Dict]) -> int:
 
 
 def select_network_interface(interfaces: List[Dict]) -> int:
-    """交互式选择网络接口"""
+    """ネットワークインターフェースを対話的に選択する。"""
     if not interfaces:
-        raise RuntimeError("未找到可用的网络接口")
+        raise RuntimeError("利用可能なネットワークインターフェースが見つかりません")
 
-    print("\n可用的网络接口:\n")
+    print("\n利用可能なネットワークインターフェース：\n")
     for i, iface in enumerate(interfaces):
         addrs = ", ".join(iface["addresses"])
         print(f"  {i:2d}. {iface['name']}")
-        print(f"      IPv4: {addrs}")
-        print(f"      Scapy: {iface['scapy_name']}\n")
+        print(f"      IPv4：{addrs}")
+        print(f"      Scapy：{iface['scapy_name']}\n")
 
     while True:
         try:
-            choice = input("请输入要使用的网络接口编号 (直接回车自动选择): ").strip()
+            choice = input("使用するインターフェース番号を入力してください（空欄で自動選択）：").strip()
             if not choice:
                 return auto_select_network_interface(interfaces)
             
             index = int(choice)
             if 0 <= index < len(interfaces):
                 return index
-            print("[!] 接口编号超出范围")
+            print("[!] インターフェース番号が範囲外です")
         except ValueError:
-            print("[!] 请输入有效的数字")
+            print("[!] 有効な数字を入力してください")
         except KeyboardInterrupt:
-            print("\n[!] 用户取消选择")
+            print("\n[!] ユーザーが選択をキャンセルしました")
             raise
 
 
-# ===== IP过滤函数 =====
+# ===== IPフィルター関数 =====
 
 def is_private_or_loopback_ipv4(ip: str) -> bool:
-    """判断是否为私有或回环地址"""
+    """プライベートアドレスまたはループバックアドレスか判定する。"""
     if ip.startswith(("127.", "10.", "192.168.")):
         return True
     
@@ -165,7 +174,7 @@ def is_private_or_loopback_ipv4(ip: str) -> bool:
 
 
 def external_only_packet(pkt) -> bool:
-    """外网过滤：只要任一端是公网地址，就认为是外网相关"""
+    """外部通信をフィルターする。一方の端でもグローバルアドレスなら対象とする。"""
     if IP in pkt:
         return (not is_private_or_loopback_ipv4(pkt[IP].src)) or \
                (not is_private_or_loopback_ipv4(pkt[IP].dst))
@@ -174,30 +183,21 @@ def external_only_packet(pkt) -> bool:
     return False
 
 
-FlowKey = Tuple[str, int, str, int, int]  # (src_ip, src_port, dst_ip, dst_port, proto)
-
-
-@dataclass
-class DirReasm:
-    """单向流重组数据"""
-    next_seq: int = -1
-    cache: Dict[int, bytes] = field(default_factory=dict)
-    data: bytes = b""
-    last_seen: float = 0.0
-
-
-@dataclass
-class TcpFlow:
-    """TCP流状态"""
-    forward: DirReasm = field(default_factory=DirReasm)
-    reverse: DirReasm = field(default_factory=DirReasm)
-    identified: bool = False
+@dataclass(frozen=True)
+class CaptureStatus:
+    """外部コンポーネントへ公開する捕捉器の読み取り専用状態。"""
+    interface: Optional[str]
+    pid: Optional[int]
+    tcp_ports: Tuple[int, ...]
+    udp_ports: Tuple[int, ...]
+    is_running: bool
+    last_error: Optional[str]
 
 
 class PacketCapture:
     """
-    网络包捕获器 - 输出独立bin文件
-    支持zstd自动解压和大小过滤
+    ネットワークパケット捕捉器。独立したbinファイルへ出力する。
+    zstd自動展開とサイズフィルターに対応する。
     """
 
     MAX_PACKET_SIZE = 0x0FFFFF
@@ -215,6 +215,8 @@ class PacketCapture:
         identify_signature: bytes = b"\x00\x63\x33\x53\x42\x00",
         bpf_extra: Optional[str] = None,
         auto_decompress: bool = True,
+        tcp_watch_ports: Optional[Set[int]] = None,
+        write_files: bool = True,
     ):
         self.interface = interface
         self.process_name = process_name
@@ -226,6 +228,8 @@ class PacketCapture:
         self.identify_signature = identify_signature
         self.bpf_extra = bpf_extra
         self.auto_decompress = auto_decompress
+        self.tcp_watch_ports = set(tcp_watch_ports or ())
+        self.write_files = bool(write_files)
 
         os.makedirs(output_dir, exist_ok=True)
 
@@ -233,27 +237,27 @@ class PacketCapture:
         self.callback: Optional[Callable[[Dict[str, Any]], None]] = None
 
         self._lock = threading.Lock()
-        self._flows: Dict[FlowKey, TcpFlow] = {}
-
         self._pid: Optional[int] = None
         self._tcp_ports: Set[int] = set()
         self._udp_ports: Set[int] = set()
 
-        # zstd解压器
+        # zstd展開器
         self._zstd_dctx = zstd.ZstdDecompressor() if HAS_ZSTD else None
 
-        # 包计数器
+        # パケットカウンター
         self._packet_counter = 0
         self._counter_lock = threading.Lock()
 
-        # 统计数据
+        # 統計データ
         self.stats = defaultdict(int)
+        self.last_error: Optional[str] = None
+        self.sniff_started = threading.Event()
 
-    # -------------------- PID/端口追踪 --------------------
+    # -------------------- PID・ポート追跡 --------------------
 
     @staticmethod
     def _find_pids_by_name(name: str) -> List[int]:
-        """根据进程名查找PID"""
+        """プロセス名からPIDを検索する。"""
         n = name.lower().strip()
         pids = []
         
@@ -270,7 +274,7 @@ class PacketCapture:
 
     @staticmethod
     def _choose_pid(pids: List[int]) -> Optional[int]:
-        """选择最新创建的进程"""
+        """最も新しく作成されたプロセスを選択する。"""
         best = None
         best_ctime = -1.0
         
@@ -287,7 +291,7 @@ class PacketCapture:
 
     @staticmethod
     def _ports_for_pid(pid: int) -> Tuple[Set[int], Set[int]]:
-        """获取进程占用的TCP和UDP端口"""
+        """プロセスが使用しているTCP・UDPポートを取得する。"""
         tcp_ports: Set[int] = set()
         udp_ports: Set[int] = set()
         
@@ -308,7 +312,7 @@ class PacketCapture:
         return tcp_ports, udp_ports
 
     def _port_update_loop(self) -> None:
-        """端口更新循环"""
+        """ポート更新ループ。"""
         while self.is_running:
             pids = self._find_pids_by_name(self.process_name)
             pid = self._choose_pid(pids) if pids else None
@@ -324,30 +328,71 @@ class PacketCapture:
             tcp, udp = self._ports_for_pid(pid)
 
             with self._lock:
+                if self._pid != pid:
+                    # プロセスが再起動した場合だけ古い接続を捨てる。
+                    self._tcp_ports.clear()
+                    self._udp_ports.clear()
                 self._pid = pid
-                self._tcp_ports = tcp
-                self._udp_ports = udp
+                # psutil.net_connections()はWindows上で一時的に空や不完全な
+                # 結果を返すことがある。稼働中の同一PIDについて、既知の
+                # ポートを一度の揺らぎで失わないよう累積する。
+                self._tcp_ports.update(tcp)
+                self._udp_ports.update(udp)
 
             time.sleep(self.poll_interval)
 
-    # -------------------- 启停 --------------------
+    def _refresh_process_ports(self) -> None:
+        """対象PIDとポートを同期的に1回更新する。"""
+        pids = self._find_pids_by_name(self.process_name)
+        pid = self._choose_pid(pids) if pids else None
+        tcp, udp = self._ports_for_pid(pid) if pid is not None else (set(), set())
+        with self._lock:
+            self._pid = pid
+            self._tcp_ports = tcp
+            self._udp_ports = udp
+
+    # -------------------- 起動・停止 --------------------
 
     def start(self, callback: Optional[Callable[[Dict[str, Any]], None]] = None) -> None:
-        """启动抓包"""
+        """パケット捕捉を開始する。"""
+        if not self.interface:
+            interfaces = get_network_interfaces()
+            if not interfaces:
+                raise RuntimeError("捕捉可能なネットワークインターフェースが見つかりません")
+            self.interface = interfaces[auto_select_network_interface(interfaces)]["scapy_name"]
+
         self.callback = callback
+        self.last_error = None
+        self.sniff_started.clear()
+        self._refresh_process_ports()
         self.is_running = True
         threading.Thread(target=self._port_update_loop, daemon=True).start()
-        threading.Thread(target=self._cleanup_loop, daemon=True).start()
         threading.Thread(target=self._sniff_loop, daemon=True).start()
 
     def stop(self) -> None:
-        """停止抓包"""
+        """パケット捕捉を停止する。"""
         self.is_running = False
 
-    # -------------------- 抓包与过滤 --------------------
+    def status_snapshot(self) -> CaptureStatus:
+        """内部lockや可変setを公開せず、現在状態のスナップショットを返す。"""
+        with self._lock:
+            return CaptureStatus(
+                self.interface,
+                self._pid,
+                tuple(sorted(self._tcp_ports)),
+                tuple(sorted(self._udp_ports)),
+                self.is_running,
+                self.last_error,
+            )
+
+    def local_tcp_ports(self) -> Set[int]:
+        with self._lock:
+            return set(self._tcp_ports)
+
+    # -------------------- パケット捕捉とフィルター --------------------
 
     def _sniff_loop(self) -> None:
-        """抓包循环"""
+        """パケット捕捉ループ。"""
         bpf = self.bpf_extra if self.bpf_extra else None
 
         def lfilter(pkt):
@@ -358,7 +403,7 @@ class PacketCapture:
                 return False
 
             with self._lock:
-                tcp_ports = set(self._tcp_ports)
+                tcp_ports = set(self._tcp_ports) | self.tcp_watch_ports
                 udp_ports = set(self._udp_ports)
 
             if TCP in pkt:
@@ -372,10 +417,13 @@ class PacketCapture:
         def prn(pkt):
             try:
                 self._process_packet(pkt)
-            except Exception:
-                pass
+            except Exception as exc:
+                self.stats["packet_errors"] += 1
+                self.last_error = f"packet callback {type(exc).__name__}: {exc}"
+                print(f"[パケット処理エラー] {self.last_error}", file=sys.stderr)
 
         try:
+            self.sniff_started.set()
             sniff(
                 iface=self.interface,
                 prn=prn,
@@ -384,24 +432,27 @@ class PacketCapture:
                 lfilter=lfilter,
                 stop_filter=lambda _: not self.is_running,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            self.stats["sniff_errors"] += 1
+            self.is_running = False
+            print(f"[捕捉エラー] {self.last_error}", file=sys.stderr)
 
     def _get_next_packet_number(self) -> int:
-        """获取下一个包编号（线程安全）"""
+        """次のパケット番号を取得する（スレッドセーフ）。"""
         with self._counter_lock:
             self._packet_counter += 1
             return self._packet_counter
 
     def _try_decompress_zstd(self, data: bytes) -> Tuple[bytes, bool]:
         """
-        尝试解压zstd数据
-        返回: (数据, 是否解压成功)
+        zstdデータの展開を試みる。
+        戻り値：(データ、展開に成功したかどうか)
         """
         if not self.auto_decompress or not self._zstd_dctx:
             return data, False
         
-        # zstd魔术字节: 0x28 0xB5 0x2F 0xFD
+        # zstdマジックバイト：0x28 0xB5 0x2F 0xFD
         if len(data) >= 4 and data[:4] == b'\x28\xB5\x2F\xFD':
             try:
                 decompressed = self._zstd_dctx.decompress(data, max_output_size=16 * 1024 * 1024)
@@ -414,16 +465,16 @@ class PacketCapture:
     def _write_bin_file(self, payload: bytes, src_ip: str, src_port: int, 
                         dst_ip: str, dst_port: int, proto: str) -> str:
         """
-        写入单个bin文件
-        返回文件名
+        1つのbinファイルを書き込む。
+        ファイル名を返す。
         """
-        # 尝试解压
+        # 展開を試行
         final_data, was_decompressed = self._try_decompress_zstd(payload)
         
         if was_decompressed:
             self.stats["decompressed_count"] += 1
         
-        # 生成文件名
+        # ファイル名を生成
         pkt_num = self._get_next_packet_number()
         timestamp = ts_ms()
         comp_mark = "_zstd" if was_decompressed else ""
@@ -443,16 +494,16 @@ class PacketCapture:
         self.stats["written_bins"] += 1
         return filename
 
-    # -------------------- 核心处理 --------------------
+    # -------------------- 中核処理 --------------------
 
     def _process_packet(self, pkt) -> None:
-        """处理单个数据包"""
+        """1つのパケットを処理する。"""
         if not self.is_running:
             return
 
         self.stats["seen_total"] += 1
 
-        # 取IP信息
+        # IP情報を取得
         if IP in pkt:
             src_ip, dst_ip = pkt[IP].src, pkt[IP].dst
         elif IPv6 in pkt:
@@ -460,7 +511,7 @@ class PacketCapture:
         else:
             return
 
-        # UDP处理
+        # UDP処理
         if UDP in pkt and self.include_udp:
             self.stats["seen_udp"] += 1
             payload = bytes(pkt[UDP].payload) if pkt[UDP].payload else b""
@@ -471,12 +522,14 @@ class PacketCapture:
             
             self.stats["udp_payload_bytes"] += len(payload)
             
-            filename = self._write_bin_file(
-                payload, 
-                src_ip, int(pkt[UDP].sport),
-                dst_ip, int(pkt[UDP].dport),
-                "UDP"
-            )
+            filename = None
+            if self.write_files:
+                filename = self._write_bin_file(
+                    payload,
+                    src_ip, int(pkt[UDP].sport),
+                    dst_ip, int(pkt[UDP].dport),
+                    "UDP"
+                )
             
             if self.callback:
                 self.callback({
@@ -488,7 +541,7 @@ class PacketCapture:
                 })
             return
 
-        # TCP处理
+        # TCP処理
         if TCP in pkt:
             self.stats["seen_tcp"] += 1
             tcp = pkt[TCP]
@@ -505,12 +558,14 @@ class PacketCapture:
             self.stats["tcp_payload_bytes"] += len(payload)
             self.stats["matched_by_ports"] += 1
 
-            filename = self._write_bin_file(
-                payload,
-                src_ip, int(tcp.sport),
-                dst_ip, int(tcp.dport),
-                "TCP"
-            )
+            filename = None
+            if self.write_files:
+                filename = self._write_bin_file(
+                    payload,
+                    src_ip, int(tcp.sport),
+                    dst_ip, int(tcp.dport),
+                    "TCP"
+                )
             
             if self.callback:
                 self.callback({
@@ -519,69 +574,54 @@ class PacketCapture:
                     "dst": f"{dst_ip}:{int(tcp.dport)}",
                     "len": len(payload),
                     "file": filename,
+                    # リアルタイムのストリーム復元用途。保存ファイルは従来どおり維持する。
+                    "payload": payload,
+                    "seq": int(tcp.seq),
                 })
-
-    # -------------------- 清理线程 --------------------
-
-    def _cleanup_loop(self) -> None:
-        """清理超时流"""
-        while self.is_running:
-            time.sleep(5)
-            now = time.time()
-            
-            with self._lock:
-                dead = [
-                    k for k, f in self._flows.items()
-                    if max(f.forward.last_seen, f.reverse.last_seen) 
-                    and (now - max(f.forward.last_seen, f.reverse.last_seen) > self.FRAGMENT_TIMEOUT)
-                ]
-                for k in dead:
-                    self._flows.pop(k, None)
-
 
 # -------------------- CLI --------------------
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="网络包捕获器 - 二进制输出，自动接口选择")
-    ap.add_argument("--list-ifaces", action="store_true", help="列出网络接口并退出")
-    ap.add_argument("--iface", default=None, help="接口名称（未指定则自动选择）")
-    ap.add_argument("--interactive", action="store_true", help="交互式选择接口")
-    ap.add_argument("--name", required=False, default="", help="进程名，如 Star.exe")
-    ap.add_argument("--out", default="", help="bin文件输出目录（默认: ./tcp_bins）")
-    ap.add_argument("--min-size", type=int, default=0, help="最小包大小（字节）")
-    ap.add_argument("--poll", type=float, default=0.3, help="端口轮询间隔（秒）")
-    ap.add_argument("--no-external-only", action="store_true", help="也捕获私有/回环流量")
-    ap.add_argument("--no-udp", action="store_true", help="不捕获UDP")
-    ap.add_argument("--no-decompress", action="store_true", help="禁用zstd自动解压")
+    ap = argparse.ArgumentParser(description="ネットワークパケット捕捉器 - バイナリ出力、インターフェース自動選択")
+    ap.add_argument("--list-ifaces", action="store_true", help="ネットワークインターフェースを一覧表示して終了")
+    ap.add_argument("--iface", default=None, help="インターフェース名（未指定時は自動選択）")
+    ap.add_argument("--interactive", action="store_true", help="インターフェースを対話的に選択")
+    ap.add_argument("--name", required=False, default="", help="プロセス名（例：Star.exe）")
+    ap.add_argument("--out", default="", help="binファイルの出力先（既定値：./tcp_bins）")
+    ap.add_argument("--min-size", type=int, default=0, help="パケットの最小サイズ（バイト）")
+    ap.add_argument("--poll", type=float, default=0.3, help="ポート確認間隔（秒）")
+    ap.add_argument("--no-external-only", action="store_true", help="プライベート・ループバック通信も捕捉")
+    ap.add_argument("--no-udp", action="store_true", help="UDPを捕捉しない")
+    ap.add_argument("--no-decompress", action="store_true", help="zstd自動展開を無効化")
     args = ap.parse_args()
 
-    # 获取网络接口列表
+    # ネットワークインターフェース一覧を取得
     interfaces = get_network_interfaces()
     
     if args.list_ifaces:
         if not interfaces:
-            print("[!] 未找到可用的网络接口")
+            print("[!] 利用可能なネットワークインターフェースが見つかりません")
             return 1
         
-        print("\n可用的网络接口:\n")
+        print("\n利用可能なネットワークインターフェース：\n")
         for i, iface in enumerate(interfaces):
             addrs = ", ".join(iface["addresses"])
             print(f"  {i:2d}. {iface['name']}")
-            print(f"      IPv4: {addrs}")
-            print(f"      Scapy: {iface['scapy_name']}\n")
+            print(f"      IPv4：{addrs}")
+            print(f"      Scapy：{iface['scapy_name']}\n")
         return 0
 
     if not args.name:
-        print("[!] 需要 --name 参数（进程名，如 Star.exe）")
+        print("[!] --name引数が必要です（プロセス名。例：Star.exe）")
         return 2
 
-    # 选择网络接口
+    # ネットワークインターフェースを選択
     if args.iface:
         iface = args.iface
-        print(f"[+] 使用指定接口: {iface}")
+        print(f"[+] 指定インターフェースを使用：{iface}")
     else:
         if not interfaces:
-            print("[!] 未找到可用的网络接口")
+            print("[!] 利用可能なネットワークインターフェースが見つかりません")
             return 1
         
         try:
@@ -595,8 +635,8 @@ def main() -> int:
         
         selected = interfaces[index]
         iface = selected["scapy_name"]
-        print(f"[+] 自动选择接口: {selected['name']} ({', '.join(selected['addresses'])})")
-        print(f"[+] Scapy接口名: {iface}")
+        print(f"[+] インターフェースを自動選択：{selected['name']}（{', '.join(selected['addresses'])}）")
+        print(f"[+] Scapyインターフェース名：{iface}")
 
     out = args.out.strip() or os.path.join(".", "tcp_bins")
     out = os.path.abspath(out)
@@ -615,18 +655,18 @@ def main() -> int:
 
     def cb(info: Dict[str, Any]):
         print(f"[{info.get('kind')}] {info.get('src')} -> {info.get('dst')} | "
-              f"{info.get('len')} bytes | {info.get('file')}")
+              f"{info.get('len')} バイト | {info.get('file')}")
 
-    print("\n=== PacketCapture - 二进制输出 ===")
-    print(f"进程         : {args.name}")
-    print(f"接口         : {iface}")
-    print(f"仅外网       : {not args.no_external_only}")
-    print(f"UDP          : {not args.no_udp}")
-    print(f"最小包大小   : {args.min_size} bytes")
-    print(f"自动解压     : {not args.no_decompress}")
-    print(f"输出目录     : {out}")
-    print(f"ZSTD支持     : {'YES' if HAS_ZSTD else 'NO (需安装 zstandard)'}")
-    print("\n按 Ctrl+C 停止。\n")
+    print("\n=== PacketCapture - バイナリ出力 ===")
+    print(f"プロセス       ：{args.name}")
+    print(f"インターフェース：{iface}")
+    print(f"外部通信のみ   ：{not args.no_external_only}")
+    print(f"UDP           ：{not args.no_udp}")
+    print(f"最小パケットサイズ：{args.min_size} バイト")
+    print(f"自動展開       ：{not args.no_decompress}")
+    print(f"出力先         ：{out}")
+    print(f"ZSTDサポート  ：{'あり' if HAS_ZSTD else 'なし（zstandardのインストールが必要）'}")
+    print("\nCtrl+Cで停止します。\n")
 
     cap.start(callback=cb)
 
@@ -634,16 +674,17 @@ def main() -> int:
         while True:
             time.sleep(5)
             s = cap.stats
-            print(f"[统计] pid={cap._pid} tcp端口={len(cap._tcp_ports)} udp端口={len(cap._udp_ports)} | "
-                  f"总包={s['seen_total']} tcp={s['seen_tcp']} udp={s['seen_udp']} "
-                  f"输出={s['written_bins']} tcp字节={s['tcp_payload_bytes']} "
-                  f"过小丢弃={s['dropped_too_small']} 解压={s['decompressed_count']}")
+            status = cap.status_snapshot()
+            print(f"[統計] PID={status.pid} TCPポート={len(status.tcp_ports)} UDPポート={len(status.udp_ports)} | "
+                  f"総パケット={s['seen_total']} TCP={s['seen_tcp']} UDP={s['seen_udp']} "
+                  f"出力={s['written_bins']} TCPバイト={s['tcp_payload_bytes']} "
+                  f"小さすぎて破棄={s['dropped_too_small']} 展開={s['decompressed_count']}")
     except KeyboardInterrupt:
         pass
     finally:
         cap.stop()
-        print(f"\n[+] 二进制文件已保存至: {out}")
-        print(f"[+] 总文件数: {cap.stats['written_bins']}")
+        print(f"\n[+] バイナリファイルを保存しました：{out}")
+        print(f"[+] ファイル総数：{cap.stats['written_bins']}")
     
     return 0
 

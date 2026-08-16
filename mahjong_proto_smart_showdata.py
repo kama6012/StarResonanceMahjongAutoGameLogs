@@ -1,4 +1,3 @@
-# Copyright (c) 2026 yuzeis
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -11,10 +10,10 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 
-# ===== 通用protobuf解析 =====
+# ===== 共通protobuf解析 =====
 
 def _is_printable_utf8(b: bytes) -> bool:
-    """检查字节是否为可打印的UTF-8"""
+    """バイト列が印字可能なUTF-8か確認する。"""
     try:
         s = b.decode("utf-8")
         bad = sum(1 for ch in s if ord(ch) < 32 and ch not in "\t\n\r")
@@ -24,7 +23,7 @@ def _is_printable_utf8(b: bytes) -> bool:
 
 
 def _try_decode_utf8(b: bytes) -> Optional[str]:
-    """尝试UTF-8解码"""
+    """UTF-8へのデコードを試みる。"""
     try:
         return b.decode("utf-8")
     except Exception:
@@ -32,15 +31,15 @@ def _try_decode_utf8(b: bytes) -> Optional[str]:
 
 
 def _looks_like_protobuf(b: bytes) -> bool:
-    """启发式判断是否为protobuf（最终由解析成功与否决定）"""
+    """protobufらしいデータかヒューリスティックに判定する（最終判断は解析成否による）。"""
     return bool(b) and b[0] != 0
 
 
 def _parse_unknown_protobuf(data: bytes, *, max_depth: int = 3, _depth: int = 0, 
                             max_fields: int = 2000) -> dict:
     """
-    无schema解析protobuf
-    返回 dict: field -> list(values)
+    スキーマなしでprotobufを解析する。
+    dictを返す：field -> list(values)
     """
     r = ProtoReader(data)
     out: dict = {}
@@ -103,7 +102,7 @@ def _parse_unknown_protobuf(data: bytes, *, max_depth: int = 3, _depth: int = 0,
 
 
 def _decode_showdata_bytes(b: bytes) -> dict:
-    """解码MahjongPlayerShow.ShowData字段"""
+    """MahjongPlayerShow.ShowDataフィールドをデコードする。"""
     decoded = _parse_unknown_protobuf(b, max_depth=4) if b else {}
     return {
         "_as": "showdata",
@@ -113,15 +112,15 @@ def _decode_showdata_bytes(b: bytes) -> dict:
     }
 
 
-# ===== Zstd助手 =====
+# ===== Zstd補助 =====
 
 def maybe_zstd_decompress(data: bytes) -> Tuple[bytes, bool, str]:
     """
-    尝试解压zstd帧数据
-    支持无内容大小的帧（stream_reader）
-    返回 (payload, is_zstd, note)
+    zstdフレームデータの展開を試みる。
+    コンテンツサイズがないフレーム（stream_reader）にも対応する。
+    (payload, is_zstd, note)を返す。
     """
-    # zstd帧魔术字节: 28 B5 2F FD
+    # zstdフレームのマジックバイト：28 B5 2F FD
     candidates = [0]
     for i in range(1, min(4096, len(data) - 4)):
         if data[i:i + 4] == b"\x28\xb5\x2f\xfd":
@@ -131,7 +130,7 @@ def maybe_zstd_decompress(data: bytes) -> Tuple[bytes, bool, str]:
     try:
         import zstandard as zstd
     except ImportError as e:
-        return data, False, f"zstd模块不可用 ({e})"
+        return data, False, f"zstdモジュールを利用できません（{e}）"
 
     last_err: Optional[Exception] = None
     for off in candidates:
@@ -140,23 +139,23 @@ def maybe_zstd_decompress(data: bytes) -> Tuple[bytes, bool, str]:
             with dctx.stream_reader(io.BytesIO(data[off:])) as reader:
                 out = reader.read()
             if out:
-                return out, True, f"zstd流解压成功（偏移 {off}）"
+                return out, True, f"zstdストリームの展開に成功（オフセット {off}）"
         except Exception as e:
             last_err = e
             continue
 
-    return data, False, f"未使用zstd ({last_err})" if last_err else "未使用zstd"
+    return data, False, f"zstd未使用（{last_err}）" if last_err else "zstd未使用"
 
 
-# ===== Protobuf wire reader =====
+# ===== Protobufワイヤーリーダー =====
 
 class ProtoDecodeError(Exception):
-    """Protobuf解码错误"""
+    """Protobufデコードエラー。"""
     pass
 
 
 class ProtoReader:
-    """Protobuf字节流读取器"""
+    """Protobufバイトストリームリーダー。"""
     
     def __init__(self, data: bytes, start: int = 0, limit: Optional[int] = None):
         self.data = data
@@ -172,7 +171,7 @@ class ProtoReader:
 
     def _need(self, n: int):
         if self.i + n > self.limit:
-            raise ProtoDecodeError(f"意外EOF need={n} at {self.i} limit={self.limit}")
+            raise ProtoDecodeError(f"予期しないEOF：必要={n}、位置={self.i}、上限={self.limit}")
 
     def read_u8(self) -> int:
         self._need(1)
@@ -185,7 +184,7 @@ class ProtoReader:
         result = 0
         while True:
             if shift >= max_bits:
-                raise ProtoDecodeError(f"varint过长 at {self.i}")
+                raise ProtoDecodeError(f"varintが長すぎます：位置={self.i}")
             b = self.read_u8()
             result |= ((b & 0x7F) << shift)
             if (b & 0x80) == 0:
@@ -211,7 +210,7 @@ class ProtoReader:
         return b
 
     def read_key(self) -> Tuple[int, int, int]:
-        """返回 (field, wire, key_pos)"""
+        """(field, wire, key_pos)を返す。"""
         key_pos = self.i
         key = self.read_varint(32)
         wire = key & 0x7
@@ -219,7 +218,7 @@ class ProtoReader:
         return field, wire, key_pos
 
     def skip_field(self, field: int, wire: int) -> bytes:
-        """跳过字段值字节（不包括key varint）"""
+        """フィールド値のバイトをスキップする（key varintを除く）。"""
         if wire == 0:
             start = self.i
             _ = self.read_varint(64)
@@ -234,7 +233,7 @@ class ProtoReader:
             _ = self.read_bytes(ln)
             return self.data[start:self.i]
         if wire == 3:
-            # start-group: 消费直到匹配的end-group (wire=4)
+            # start-group：対応するend-group（wire=4）まで消費
             start = self.i
             depth = 1
             while not self.eof() and depth > 0:
@@ -255,14 +254,14 @@ class ProtoReader:
             start = self.i
             _ = self.read_fixed32()
             return self.data[start:self.i]
-        raise ProtoDecodeError(f"不支持的wire={wire}")
+        raise ProtoDecodeError(f"未対応のwire={wire}")
 
 
-# ===== Schema系统 =====
+# ===== スキーマシステム =====
 
 @dataclass(frozen=True)
 class FieldSpec:
-    """字段规格"""
+    """フィールド仕様。"""
     name: str
     kind: str  # int32,int64,bool,string,bytes,repeated_int32,message,repeated_message
     msg: Optional[str] = None
@@ -274,11 +273,11 @@ SCHEMAS: Dict[str, Schema] = {}
 
 
 def define_schema(msg: str, schema: Schema):
-    """定义消息schema"""
+    """メッセージschemaを定義する。"""
     SCHEMAS[msg] = schema
 
 
-# 已知消息定义
+# 既知メッセージ定義
 define_schema("Zproto.MahjongOpenMeld", {
     1: FieldSpec("MeldType", "int32"),
     2: FieldSpec("Cards", "repeated_int32", packed_ok=True),
@@ -329,15 +328,15 @@ define_schema("Zproto.MahjongSyncOpMessage", {
     8: FieldSpec("PlayerSelf", "message", msg="Zproto.MahjongPlayerSelf"),
 })
 
-# 未知内部消息：保持空schema
+# 未知の内部メッセージ：空のschemaを保持
 define_schema("Zproto.MahjongOperation", {})
 define_schema("Zproto.MahjongPlayerSelf", {})
 
 
-# ===== 助手函数 =====
+# ===== 補助関数 =====
 
 def _try_utf8(b: bytes) -> Optional[str]:
-    """尝试UTF-8解码"""
+    """UTF-8へのデコードを試みる。"""
     try:
         s = b.decode("utf-8")
         bad = sum(1 for ch in s if ord(ch) < 0x20 and ch not in "\r\n\t")
@@ -347,16 +346,16 @@ def _try_utf8(b: bytes) -> Optional[str]:
 
 
 def _hex_preview(b: bytes, n: int = 64) -> str:
-    """生成hex预览"""
+    """hexプレビューを生成する。"""
     h = binascii.hexlify(b[:n]).decode("ascii")
     return h + ("..." if len(b) > n else "")
 
 
-# ===== 智能解码器 =====
+# ===== スマートデコーダー =====
 
 @dataclass
 class DecodeResult:
-    """解码结果"""
+    """デコード結果。"""
     obj: Dict[str, Any]
     fatal: bool
     unknown_count: int
@@ -365,14 +364,14 @@ class DecodeResult:
 
 
 class ProtobufSmartDecoder:
-    """智能Protobuf解码器"""
+    """スマートProtobufデコーダー。"""
     
     def __init__(self, max_depth: int = 10):
         self.max_depth = max_depth
 
     def decode_as(self, msg_type: str, data: bytes, start: int = 0, 
                   depth: int = 0, limit: Optional[int] = None) -> DecodeResult:
-        """按指定类型解码"""
+        """指定された型としてデコードする。"""
         schema = SCHEMAS.get(msg_type, {})
         r = ProtoReader(data, start=start, limit=limit)
         out: Dict[str, Any] = {
@@ -384,7 +383,7 @@ class ProtobufSmartDecoder:
         known = 0
         unknown = 0
 
-        # 预创建repeated字段的列表
+        # repeatedフィールドのリストをあらかじめ作成
         for fs in schema.values():
             if fs.kind in ("repeated_int32", "repeated_message"):
                 out.setdefault(fs.name, [])
@@ -396,26 +395,26 @@ class ProtobufSmartDecoder:
             except ProtoDecodeError as e:
                 out["_unknown"].append({
                     "field": -1, "wire": -1, "pos": r.tell(), 
-                    "raw": "", "note": f"key解码错误: {e}"
+                    "raw": "", "note": f"keyのデコードエラー：{e}"
                 })
                 out["_fatal"] = True
                 break
 
-            # 非法字段号0
+            # 不正なフィールド番号0
             if field == 0:
                 out["_unknown"].append({
                     "field": 0, "wire": wire, "pos": key_pos, 
                     "raw": data[key_pos:key_pos + 1].hex(), 
-                    "note": "非法字段号0（错误偏移/非protobuf起点）"
+                    "note": "不正なフィールド番号0（オフセット不正またはprotobuf開始位置ではない）"
                 })
                 out["_fatal"] = True
                 break
 
-            # 顶层end-group -> 错误偏移
+            # トップレベルのend-group -> オフセット不正
             if wire == 4:
                 out["_unknown"].append({
                     "field": field, "wire": 4, "pos": key_pos, 
-                    "raw": "", "note": "意外end-group（错误偏移/损坏）"
+                    "raw": "", "note": "予期しないend-group（オフセット不正または破損）"
                 })
                 out["_fatal"] = True
                 break
@@ -431,7 +430,7 @@ class ProtobufSmartDecoder:
                     })
                     continue
 
-                # 已知字段
+                # 既知フィールド
                 if fs.kind in ("int32", "int64"):
                     if wire != 0:
                         raw = r.skip_field(field, wire)
@@ -439,7 +438,7 @@ class ProtobufSmartDecoder:
                         out["_unknown"].append({
                             "field": field, "wire": wire, "pos": key_pos, 
                             "raw": _hex_preview(raw), 
-                            "note": f"wire不匹配，期望varint for {fs.kind}"
+                            "note": f"wireが不一致。{fs.kind}にはvarintが必要"
                         })
                         out["_fatal"] = True
                         break
@@ -452,7 +451,7 @@ class ProtobufSmartDecoder:
                         unknown += 1
                         out["_unknown"].append({
                             "field": field, "wire": wire, "pos": key_pos, 
-                            "raw": _hex_preview(raw), "note": "wire不匹配，期望varint for bool"
+                            "raw": _hex_preview(raw), "note": "wireが不一致。boolにはvarintが必要"
                         })
                         out["_fatal"] = True
                         break
@@ -465,7 +464,7 @@ class ProtobufSmartDecoder:
                         unknown += 1
                         out["_unknown"].append({
                             "field": field, "wire": wire, "pos": key_pos, 
-                            "raw": _hex_preview(raw), "note": "wire不匹配，期望len-delimited for string"
+                            "raw": _hex_preview(raw), "note": "wireが不一致。stringにはlen-delimitedが必要"
                         })
                         out["_fatal"] = True
                         break
@@ -485,7 +484,7 @@ class ProtobufSmartDecoder:
                         unknown += 1
                         out["_unknown"].append({
                             "field": field, "wire": wire, "pos": key_pos, 
-                            "raw": _hex_preview(raw), "note": "wire不匹配，期望len-delimited for bytes"
+                            "raw": _hex_preview(raw), "note": "wireが不一致。bytesにはlen-delimitedが必要"
                         })
                         out["_fatal"] = True
                         break
@@ -522,7 +521,7 @@ class ProtobufSmartDecoder:
                         unknown += 1
                         out["_unknown"].append({
                             "field": field, "wire": wire, "pos": key_pos, 
-                            "raw": _hex_preview(raw), "note": "wire不匹配 for repeated_int32"
+                            "raw": _hex_preview(raw), "note": "repeated_int32のwireが不一致"
                         })
                         out["_fatal"] = True
                         break
@@ -533,7 +532,7 @@ class ProtobufSmartDecoder:
                         unknown += 1
                         out["_unknown"].append({
                             "field": field, "wire": wire, "pos": key_pos, 
-                            "raw": _hex_preview(raw), "note": "wire不匹配，期望len-delimited for message"
+                            "raw": _hex_preview(raw), "note": "wireが不一致。messageにはlen-delimitedが必要"
                         })
                         out["_fatal"] = True
                         break
@@ -553,7 +552,7 @@ class ProtobufSmartDecoder:
                     unknown += 1
                     out["_unknown"].append({
                         "field": field, "wire": wire, "pos": key_pos, 
-                        "raw": _hex_preview(raw), "note": f"未处理kind={fs.kind}"
+                        "raw": _hex_preview(raw), "note": f"未処理のkind={fs.kind}"
                     })
                     out["_fatal"] = True
                     break
@@ -561,7 +560,7 @@ class ProtobufSmartDecoder:
             except ProtoDecodeError as e:
                 out["_unknown"].append({
                     "field": field, "wire": wire, "pos": key_pos, 
-                    "raw": "", "note": f"解码错误: {e}"
+                    "raw": "", "note": f"デコードエラー：{e}"
                 })
                 out["_fatal"] = True
                 break
@@ -569,7 +568,7 @@ class ProtobufSmartDecoder:
             if r.tell() == pos_before:
                 out["_unknown"].append({
                     "field": field, "wire": wire, "pos": key_pos, 
-                    "raw": "", "note": "无进展（bug）"
+                    "raw": "", "note": "処理が進んでいません（バグ）"
                 })
                 out["_fatal"] = True
                 break
@@ -583,23 +582,23 @@ class ProtobufSmartDecoder:
         )
 
     def _decode_nested_smart(self, b: bytes, preferred_type: str, depth: int) -> Any:
-        """智能解码嵌套消息"""
+        """ネストされたメッセージをスマートにデコードする。"""
         if depth > self.max_depth:
             return {
                 "_type": preferred_type, 
-                "_note": "达到最大深度", 
+                "_note": "最大深度に達しました",
                 "_len": len(b), 
                 "_hex": _hex_preview(b)
             }
 
-        # 优先尝试指定类型
+        # 指定された型を優先して試行
         if preferred_type in SCHEMAS and SCHEMAS[preferred_type]:
             res = self.decode_as(preferred_type, b, start=0, depth=depth, limit=len(b))
             if not res.fatal and res.known_count > 0:
                 res.obj.pop("_fatal", None)
                 return res.obj
 
-        # 否则在常见类型中猜测
+        # それ以外は一般的な型から推定
         best_score = -1e9
         best_obj: Optional[Dict[str, Any]] = None
         best_type: Optional[str] = None
@@ -625,7 +624,7 @@ class ProtobufSmartDecoder:
             best_obj["_guessed_type"] = best_type
             return best_obj
 
-        # 回退到UTF-8或base64
+        # UTF-8またはbase64へフォールバック
         s = _try_utf8(b)
         if s is not None:
             return {"_as": "utf8", "value": s, "_len": len(b)}
@@ -633,7 +632,7 @@ class ProtobufSmartDecoder:
         return {"_as": "bytes", "base64": base64.b64encode(b).decode("ascii"), "_len": len(b)}
 
     def _score(self, res: DecodeResult, total_len: int) -> float:
-        """评分解码结果"""
+        """デコード結果を評価する。"""
         if res.fatal:
             return -1000.0
         coverage = res.end_pos / max(1, total_len)
@@ -641,7 +640,7 @@ class ProtobufSmartDecoder:
 
     def find_best_offset(self, data: bytes, msg_types: List[str], 
                          max_offset: int = 512) -> Tuple[int, str, DecodeResult]:
-        """找到最佳偏移和消息类型"""
+        """最適なオフセットとメッセージ型を見つける。"""
         best_score = -1e18
         best_off = 0
         best_type = msg_types[0]
@@ -653,7 +652,7 @@ class ProtobufSmartDecoder:
                 res = self.decode_as(t, data, start=off, depth=0, limit=len(data))
                 score = self._score(res, len(data) - off)
 
-                # 非法字段0强烈惩罚
+                # フィールド0には大きなペナルティを与える
                 if res.obj.get("_unknown"):
                     u0 = res.obj["_unknown"][0]
                     if u0.get("field") == 0:
@@ -667,7 +666,7 @@ class ProtobufSmartDecoder:
 
     def guess_and_decode(self, data: bytes, candidates: List[str], 
                          max_offset: int = 512) -> Tuple[str, Dict[str, Any]]:
-        """猜测并解码"""
+        """推定してデコードする。"""
         off, t, res = self.find_best_offset(data, candidates, max_offset=max_offset)
         obj = res.obj
         fatal = obj.pop("_fatal", False)
@@ -682,7 +681,7 @@ class ProtobufSmartDecoder:
 # ===== CLI =====
 
 def parse_bin(path: str, max_offset: int, allow_zstd: bool) -> Dict[str, Any]:
-    """解析二进制文件"""
+    """バイナリファイルを解析する。"""
     with open(path, "rb") as f:
         raw = f.read()
 
@@ -720,12 +719,12 @@ def parse_bin(path: str, max_offset: int, allow_zstd: bool) -> Dict[str, Any]:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="麻将智能Protobuf解码器")
-    ap.add_argument("path", help="输入的.bin文件")
-    ap.add_argument("--max-offset", type=int, default=512, help="探测偏移范围 [0, max-offset)")
-    ap.add_argument("--no-zstd", action="store_true", help="禁用zstd自动解压")
-    ap.add_argument("--json", dest="json_out", default="", help="输出JSON到文件")
-    ap.add_argument("--pretty", action="store_true", help="美化JSON输出")
+    ap = argparse.ArgumentParser(description="麻雀スマートProtobufデコーダー")
+    ap.add_argument("path", help="入力する.binファイル")
+    ap.add_argument("--max-offset", type=int, default=512, help="開始位置の探索範囲 [0, max-offset)")
+    ap.add_argument("--no-zstd", action="store_true", help="zstd自動展開を無効にする")
+    ap.add_argument("--json", dest="json_out", default="", help="JSONをファイルへ出力する")
+    ap.add_argument("--pretty", action="store_true", help="JSONを整形して出力する")
     args = ap.parse_args()
 
     out = parse_bin(args.path, max_offset=args.max_offset, allow_zstd=(not args.no_zstd))

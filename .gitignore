@@ -1,17 +1,43 @@
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
 # PyInstaller
 build/
 dist/
+build-*/
+dist-*/
 *.spec
 
-# Captured data
+# Captured and generated game data (may contain private network/game data)
+packet/
 tcp_bins/
 bins/
+bins-*/
+records/
 *.bin
+*.pcap
+*.pcapng
+*.log
+*.tmp
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
 
 # OS
 .DS_Store
 Thumbs.db
+Desktop.ini
