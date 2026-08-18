@@ -1,6 +1,6 @@
 # StarResonanceMahjongAutoAna
 
-Star Resonance Mahjongの対局通信から卓状態を復元し、Windows GUIへリアルタイム表示するオープンソースの追跡ツールです。
+Blue Protocol:Star Resonance (スターレゾナンス/星痕共鳴)の対局通信から卓状態を復元し、Windows GUIへリアルタイム表示するオープンソースの追跡ツールです。
 
 > [!IMPORTANT]
 > 本プロジェクトは非公式であり、ゲームの開発元・運営元とは関係ありません。ゲーム名などの商標は各権利者に帰属します。
